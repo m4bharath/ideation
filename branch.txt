@@ -1,0 +1,51 @@
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.operators.ssh import SSHOperator
+from airflow.utils.dates import days_ago
+
+default_args = {
+    'owner': 'your_owner',
+    'start_date': days_ago(2)
+}
+
+def run_python_script(ssh_conn_id, script_path):
+    """Runs a Python script via SSH."""
+    # ... your SSH code here ...
+
+def dummy_task():
+    """A dummy task that always returns True."""
+    return True
+
+with DAG('your_dag_name', default_args=default_args, schedule_interval=None) as dag:
+    skip_stage = "{{ var.value.skip_stage }}"
+
+    task_group = TaskGroup(group_id='stage_task_group')
+
+    python_script_task = PythonOperator(
+        task_id='run_python_script',
+        python_callable=run_python_script,
+        op_kwargs={'ssh_conn_id': 'your_ssh_conn_id', 'script_path': 'your_script_path'},
+        trigger_rule="all_done",  # Always run, regardless of upstream task's state
+        dag=dag
+    )
+
+    dummy_task = PythonOperator(
+        task_id='dummy_task',
+        python_callable=dummy_task,
+        trigger_rule="all_done",  # Always run, regardless of upstream task's state
+        dag=dag
+    )
+
+    task_group.add_task(python_script_task)
+    task_group.add_task(dummy_task)
+
+    python_script_task.set_downstream(dummy_task)
+
+    # Branching based on skip_stage flag
+    branching = BranchOperator(
+        task_id='branching',
+        follow_task_id='run_python_script' if skip_stage == 'n' else 'dummy_task',
+        dag=dag
+    )
+
+    branching.set_upstream(task_group)
