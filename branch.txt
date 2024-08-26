@@ -68,6 +68,13 @@ with DAG(
 
     # Define task dependencies
     start >> branching
+    
+    # Branching task's output should lead to the appropriate task in the TaskGroup
     branching >> task_group
-    task_group >> dm_load
+
+    # All tasks in task_group should be handled separately:
+    t_stg_load >> dm_load
+    t_dummy_task >> dm_load
+
+    # End task
     dm_load >> end
