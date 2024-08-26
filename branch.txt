@@ -1,80 +1,47 @@
 from airflow import DAG
+from airflow.operators.ssh import SSHOperator
 from airflow.operators.dummy import DummyOperator
-from airflow.operators.python import PythonOperator
-from airflow.operators.branch import BranchPythonOperator
+from airflow.operators.python import BranchPythonOperator
 from airflow.utils.dates import days_ago
-from airflow.utils.task_group import TaskGroup
 
-# Define default arguments for the DAG
 default_args = {
-    'owner': 'airflow',
-    'retries': 1,
+    'owner': 'your_owner',
+    'start_date': days_ago(2),
+    'params': {
+        'skip_stage_load': 'N'  # Default value
+    }
 }
 
-# Initialize the DAG
 with DAG(
-    'tg_write_stage_load',
+    'write_data_to_stage_dag',
     default_args=default_args,
-    description='A DAG with conditional execution and TaskGroup',
-    schedule_interval=None,  # Set to your desired schedule
-    start_date=days_ago(1),
-    catchup=False,
-    params={'skip_stage_flag': 'N'}  # Default value for demonstration
+    schedule_interval=None
 ) as dag:
 
-    # Define the branching function
-    def branch_decision(**kwargs):
-        # Retrieve skip_stage_flag from DAG parameters
-        skip_stage_flag = kwargs['params'].get('skip_stage_flag', 'N')
-        if skip_stage_flag == 'Y':
-            return 'task_group.t_dummy_task'  # Run t_dummy_task if skip_stage_flag is 'Y'
-        else:
-            return 'task_group.t_stg_load'    # Run t_stg_load if skip_stage_flag is 'N'
+    skip_stage_flag = dag.params.skip_stage_load
 
-    # BranchPythonOperator to determine the execution path
-    branching = BranchPythonOperator(
-        task_id='branching',
-        python_callable=branch_decision,
-        provide_context=True
-    )
-
-    # Define the start task
-    start = DummyOperator(
-        task_id='start'
-    )
-
-    # Define a TaskGroup to group the tasks
-    with TaskGroup("task_group") as task_group:
-        
-        # Stage load task to run if skip_stage_flag is 'N'
-        t_stg_load = DummyOperator(
-            task_id='t_stg_load'
+    with TaskGroup("tg_write_stage_load") as tg_write_stage_load:
+        t_write_data_to_stage = SSHOperator(
+            task_id='t_stg_load',
+            ssh_conn_id='ATLAS SSH',
+            command="source/home/{{ ti.xcom_pull(key='metainfo') }}/statsenv; your_actual_command",
+            trigger_rule="all_success"
         )
 
-        # Dummy task to run if skip_stage_flag is 'Y'
         t_dummy_task = DummyOperator(
             task_id='t_dummy_task'
         )
 
-    # Define the DM_LOAD task
-    dm_load = DummyOperator(
-        task_id='dm_load'
-    )
+        # Branching within the task group
+        branching = BranchPythonOperator(
+            task_id='branching',
+            python_callable=lambda: 't_dummy_task' if skip_stage_flag == 'Y' else 't_stg_load',
+            dag=tg_write_stage_load
+        )
 
-    # Define the end task
-    end = DummyOperator(
-        task_id='end'
-    )
+        # Set both tasks as downstream of the branching operator within the task group
+        t_write_data_to_stage >> branching
+        t_dummy_task >> branching
 
-    # Define task dependencies
-    start >> branching
-    
-    # Branching task's output should lead to the appropriate task in the TaskGroup
-    branching >> task_group
-
-    # All tasks in task_group should be handled separately:
-    t_stg_load >> dm_load
-    t_dummy_task >> dm_load
-
-    # End task
-    dm_load >> end
+    # Set the task group as upstream for the subsequent task
+    tg_write_stage_load >> subsequent_task
