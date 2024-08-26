@@ -1,51 +1,73 @@
 from airflow import DAG
+from airflow.operators.dummy import DummyOperator
 from airflow.operators.python import PythonOperator
-from airflow.operators.ssh import SSHOperator
+from airflow.operators.branch import BranchPythonOperator
 from airflow.utils.dates import days_ago
+from airflow.utils.task_group import TaskGroup
 
+# Define default arguments for the DAG
 default_args = {
-    'owner': 'your_owner',
-    'start_date': days_ago(2)
+    'owner': 'airflow',
+    'retries': 1,
 }
 
-def run_python_script(ssh_conn_id, script_path):
-    """Runs a Python script via SSH."""
-    # ... your SSH code here ...
+# Initialize the DAG
+with DAG(
+    'tg_write_stage_load',
+    default_args=default_args,
+    description='A DAG with conditional execution and TaskGroup',
+    schedule_interval=None,  # Set to your desired schedule
+    start_date=days_ago(1),
+    catchup=False,
+    params={'skip_stage_flag': 'N'}  # Default value for demonstration
+) as dag:
 
-def dummy_task():
-    """A dummy task that always returns True."""
-    return True
+    # Define the branching function
+    def branch_decision(**kwargs):
+        # Retrieve skip_stage_flag from DAG parameters
+        skip_stage_flag = kwargs['params'].get('skip_stage_flag', 'N')
+        if skip_stage_flag == 'Y':
+            return 'task_group.t_dummy_task'  # Run t_dummy_task if skip_stage_flag is 'Y'
+        else:
+            return 'task_group.t_stg_load'    # Run t_stg_load if skip_stage_flag is 'N'
 
-with DAG('your_dag_name', default_args=default_args, schedule_interval=None) as dag:
-    skip_stage = "{{ var.value.skip_stage }}"
-
-    task_group = TaskGroup(group_id='stage_task_group')
-
-    python_script_task = PythonOperator(
-        task_id='run_python_script',
-        python_callable=run_python_script,
-        op_kwargs={'ssh_conn_id': 'your_ssh_conn_id', 'script_path': 'your_script_path'},
-        trigger_rule="all_done",  # Always run, regardless of upstream task's state
-        dag=dag
-    )
-
-    dummy_task = PythonOperator(
-        task_id='dummy_task',
-        python_callable=dummy_task,
-        trigger_rule="all_done",  # Always run, regardless of upstream task's state
-        dag=dag
-    )
-
-    task_group.add_task(python_script_task)
-    task_group.add_task(dummy_task)
-
-    python_script_task.set_downstream(dummy_task)
-
-    # Branching based on skip_stage flag
-    branching = BranchOperator(
+    # BranchPythonOperator to determine the execution path
+    branching = BranchPythonOperator(
         task_id='branching',
-        follow_task_id='run_python_script' if skip_stage == 'n' else 'dummy_task',
-        dag=dag
+        python_callable=branch_decision,
+        provide_context=True
     )
 
-    branching.set_upstream(task_group)
+    # Define the start task
+    start = DummyOperator(
+        task_id='start'
+    )
+
+    # Define a TaskGroup to group the tasks
+    with TaskGroup("task_group") as task_group:
+        
+        # Stage load task to run if skip_stage_flag is 'N'
+        t_stg_load = DummyOperator(
+            task_id='t_stg_load'
+        )
+
+        # Dummy task to run if skip_stage_flag is 'Y'
+        t_dummy_task = DummyOperator(
+            task_id='t_dummy_task'
+        )
+
+    # Define the DM_LOAD task
+    dm_load = DummyOperator(
+        task_id='dm_load'
+    )
+
+    # Define the end task
+    end = DummyOperator(
+        task_id='end'
+    )
+
+    # Define task dependencies
+    start >> branching
+    branching >> task_group
+    task_group >> dm_load
+    dm_load >> end
